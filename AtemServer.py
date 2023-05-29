@@ -3,32 +3,38 @@
 from pyatem.protocol import AtemProtocol
 from SuperSourceFuncs import SuperSourceCommand
 
+import CommandServer
+
 import SuperSourceFuncs
-import AtemServerComm
+import USKFuncs
 
 import time
 import threading
 import logging
 from functools import partial
-
-
-#switcher.state["me"] = 0  # TODO: Read from config
+import copy
+import argparse
 
 class AtemConnection(threading.Thread):
-    def __init__(self, callback):
-        self.callback_ = callback
+    def __init__(self, ip=None):
+        global state
         threading.Thread.__init__(self)
         self.name = 'Connection'
-        self.ip = None
+        self.ip_ = ip
         self.connected_ = False
         self.log_ = logging.getLogger('AtemConnection')
+        self.handlers_ = {"change": {'*': []}}
 
     def run(self):
-        if(self.ip is not None):
+        if(self.ip_ is not None):
             try:
-                self.switcher_ = AtemProtocol(self.ip)
-                self.switcher_.state = {}
-                self.switcher_.on("change", self.do_callback)   
+                self.switcher_ = AtemProtocol(self.ip_)
+                self.switcher_.on("change", self.handle_on_change)
+
+                self.switcher_.on("change:preview-bus-input:*", self.handle_preview_bus_input)
+                self.switcher_.on("change:program-bus-input:*", self.handle_program_bus_input)
+                self.switcher_.on("change:key-properties-base:*", self.handle_key_properties_base)
+                
                 self.switcher_.connect()
             except ConnectionError as e:
                 self.log_.error("Could not connect", e)
@@ -40,67 +46,72 @@ class AtemConnection(threading.Thread):
         else:
             self.log_.error("Only IP connections supported. Set IP before calling run")
 
-    def do_callback(self, *args, **kwargs):
-        self.callback_(self.switcher_, *args, **kwargs)
+    def register_on_change_handler(self, field, cbk):
+        print("ON CHANGE HANDLER", field)
+        if field not in self.handlers_["change"]:
+            self.handlers_["change"][field] = []
+        self.handlers_["change"][field].append(cbk)
+
+    def subscribe(self, variable, cbk):
+        #var = self.state_.get_variable(variable)
+        #var.subscribe(cbk)
+        pass
+    
+    def handle_preview_bus_input(self, data, **argv):
+        print("PREVIEW CHANGE", data.index, data.source)
+        #if len(self.state_.state_) > 0:
+        #    print("CACHE", self.state_.state_["0"])
+        #var = self.state_.get_variable(str(data.index) + ".preview_bus_input")
+        #print("PREVIOUS", var)
+        #var.value = data.source
         
-def handle_state_change(switcher, field, data):
-    if field == "preview-bus-input":
-        switcher.state["preview_source"] = data.source
-    elif field == "program-bus-input":
-        switcher.state["program_source"] = data.source
+    def handle_program_bus_input(self, data, **argv):
+        print("PROGRAM CHANGE", data.index, data.source)
+        #self.state_.get_variable(str(data.index) + ".program_bus_input").value = data.source
 
-import socket
-class CommandServer(threading.Thread):
-    def __init__(self, host, port):
-        self.host_ = host
-        self.port_ = port
-        self.commands_ = {}
-        self.log = logging.getLogger('CommandServer')
-        threading.Thread.__init__(self)
-
-    def add_command(self, command, callback):
-        self.commands_[command] = callback
+    def handle_key_properties_base(self, data, **argv):
+        print("KEY Properties", data)
+        #var = self.state_.get_variable(str(data.index) + ".key_properties_base")
+        #ret = copy.deepcopy(var.value)
+        #if ret is None:
+        #    ret = [{"key_source": None, "fill_source": None}]*4
+        #ret[data.index]["key_source"] = data.key_source
+        #ret[data.index]["fill_source"] = data.fill_source
+        #var = ret
         
-    def run(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.bind((self.host_, self.port_))
-            self.log.info("listening on " + self.host_ + ":" + str(self.port_))
-            while(True):
-                data = s.recvfrom(1024)
-                if not data:
-                    self.log.warning("No data")
-                end = data[0].find(b"\0", 0)
-                num_args = int(data[0][0:end])
-                start = end + 1
-                end = data[0].find(b"\0", start)
-                command = str(data[0][start:end].decode())
-                args = []
-                for arg in range(0, num_args):
-                    start = end + 1
-                    end = data[0].find(b"\0", start)
-                    arg = data[0][start:end]
-                    args.append(arg)
-                self.commands_[command](*args)
-
+        #self.state_.get_variable(data.index, "program_bus_input").set(data.source)
+        
+    def handle_on_change(self, field, data):
+        cbks = []
+        if field in self.handlers_["change"]:
+            cbks.extend(self.handlers_["change"][field])
+        cbks.extend(self.handlers_["change"]["*"])
+        for cbk in cbks:
+            cbk(self, field, data)
+            
+        #if field == "preview-bus-input":
+        #    self.handle_preview_bus_input(field, data)
+        #elif field == "program-bus-input":
+        #    self.handle_program_bus_input(field, data)
+            #self.switcher_.state["program_source"] = data.source
+        
 if __name__ == "__main__":
     print("Starting ATEM Server")
     logging.basicConfig(level=logging.INFO)
 
-    conn = AtemConnection(handle_state_change)
-    conn.ip = "192.168.255.130"
-    conn.deamon = True
+    parser = argparse.ArgumentParser(
+        prog='AtemServer',
+        description='Animated Super Source, ALPHA'
+        )
+    parser.add_argument("atem_ip")
+    args = parser.parse_args()
+    conn = AtemConnection(args.atem_ip)
     conn.start()
 
-    handle = AtemServerComm.create()
     SuperSourceFuncs.load_layouts("ss_conf.json")
 
-    server = CommandServer("127.0.0.1", 65432)
+    server = CommandServer.CommandServer("127.0.0.1", 65432, [conn])
     server.deamon = True
-    server.add_command("NextSSLayout", partial(SuperSourceFuncs.NextSSLayout, conn.switcher_, 0))
-    server.add_command("PrevSSLayout", partial(SuperSourceFuncs.PrevSSLayout, conn.switcher_, 0))
-    server.add_command("RecallSSLayout", partial(SuperSourceFuncs.RecallSSLayout, conn.switcher_, 0))
-    server.add_command("StoreSSLayout", partial(SuperSourceFuncs.StoreSSLayout, conn.switcher_, 0))
-    server.add_command("AssignSourceToSSBox", partial(SuperSourceFuncs.StoreSSLayout, conn.switcher_, 0))
     server.start()
     
     while True:

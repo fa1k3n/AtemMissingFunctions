@@ -6,44 +6,33 @@ import threading
 import time
 import copy
 import logging
-ANIMATION_LINEAR = 1
-ANIMATION_EASE_IN_OUT = 2
-ANIMATION_BOUNCE = 3
+import settings
+import animation
 
-global_settings = {
-    "animation": {
-        "type": ANIMATION_LINEAR,
-        "frequency": 25
-    },
-
-    "supersource": {
-        "current_layout": 0,
-        "layouts": []
-        "stored_layouts": [None]*4
-    }
-}
-#current_layout = 0
-#stored_layouts = [None]*4
-#layouts = []
+import command
 
 logger = logging.getLogger("SuperSourceFuncs")
 
 def load_layouts(filename):
+    logger.info("Loading layouts from " + filename)
     conf = {}
     with open(filename, "r") as confstream:
         conf = json.load(confstream)
+     
+    if "layouts" not in settings.get("supersource"):
+        logger.warning("Creating layout section in settings")
+        settings.set("supersource:layouts", [])
 
     layouts = []
     for layout in conf["layouts"]:
-        logger.debug("Found layout" + layout)
+        logger.debug("Found layout" + str(layout))
         layouts.append(layout)
-
-    return layouts
+    settings.set("supersource:layouts", layouts)
 
 def get_box_in_layout(layout_no, box_no):
     if layout_no == None:
         return None
-    for box in layouts[layout_no]["config"]:
+    for box in settings.get("supersource:layouts")[layout_no]["config"]:
         if box[0] == box_no:
             return box
     return None
@@ -53,7 +42,7 @@ def is_fullscreen_layout(layout_no):
         return False
 
     fullscreen = False
-    for box in layouts[layout_no]["config"]:
+    for box in global_settings["supersource"]["layouts"][layout_no]["config"]:
         if box[1] == 1:
             fullscreen = True
 
@@ -63,7 +52,8 @@ def is_fullscreen_layout(layout_no):
 def get_active_boxes(layout_no):
     boxes = []
     if layout_no is not None:
-        for box in layouts[layout_no]["config"]:
+        conf = settings.get("supersource:layouts")
+        for box in conf[layout_no]["config"]:
             boxes.append(box[0])
     return boxes
 
@@ -72,51 +62,30 @@ def box_in_list(box_no, box_list):
         if box[1] == box_no:
             return True
     return False
-
-# TODO: Move to common animation module
-def get_animation_factor(current_frame, total_frames, animation_type):
-    # For linear animation just leave the factor as is 
-    factor = current_frame / total_frames
-    if(animation_type == ANIMATION_EASE_IN_OUT):
-        factor_s = factor ** 2
-        factor = factor_s / (2.0 * (factor_s - factor) + 1.0)
-    elif(animation_type == ANIMATION_BOUNCE):
-        factor = factor * factor * (4.0 - 3.0 * factor)
-    return factor
         
-def get_next_animation_frame(initial_state, end_state, current_frame, total_frames, animation_type=ANIMATION_LINEAR):
-    if len(initial_state) != len(end_state):
-        print("BOX LENGTH MISSMATCH")
-    num_boxes = 4
-    new_state = copy.deepcopy(initial_state)
-    for index in range(0, num_boxes):
-        box = new_state[index]  # Reference
-        if box is not None:
-            for param_index in range(1, len(box)):  # Skip 0 which is box id
-                factor = get_animation_factor(current_frame, total_frames, animation_type)
-                box[param_index] += factor * (end_state[index][param_index] - initial_state[index][param_index])
-    return new_state
-
 def animate_transition(switcher, me, current_state, end_state, duration):
-    time_per_step = 1/animation_settings["frequency"]
-    total_frames = int(animation_settings["frequency"] * duration)
-    initial_state = copy.deepcopy(current_state)
-    for frame in range(0, total_frames + 1):
-        t1 = time.time()
+    anim_freq = settings.get("animation:frequency")
+    animator = animation.Animator(duration, animation.EASE_IN_OUT, anim_freq)
+
+    def update_atem(values):
         cmds = []
-        new_state = get_next_animation_frame(current_state, end_state, frame, total_frames, animation_settings["type"])
-        for index in range(0, 4):
-            box = new_state[index]
-            if box is not None:
-                cmds.append(SuperSourceCommand(me=me, box=box[0], enable=1, size=box[1], xpos=box[2], ypos=box[3], left_crop=box[4], right_crop=box[5], top_crop=box[6], bottom_crop=box[7]))
-        
+        for val in values:
+            cmds.append(SuperSourceCommand(me=me, box=int(val[0]), enable=1, size=val[1], xpos=val[2], ypos=val[3], left_crop=val[4], right_crop=val[5], top_crop=val[6], bottom_crop=val[7]))
         switcher.send_commands(cmds)
-        delta = time.time() - t1
-        if time_per_step > delta:
-            time.sleep(time_per_step - delta)
-            
+
+    anim_data = []
+    for index in range(0, 4):
+        box_data = []
+        if current_state[index] is None:
+          continue
+        for param in range(0, len(current_state[index])):
+            box_data.append((current_state[index][param], end_state[index][param]))
+        anim_data.append(box_data)
+    animator.start(anim_data, update_atem)
+    
 def set_layout(switcher, me, layout_no, direction="forward"):
-    global current_layout
+    current_layout = settings.get("supersource:current_layout")
+    layouts = settings.get("supersource:layouts")
     unused_boxes = range(0, 4)
     
     start_boxes = get_active_boxes(current_layout)
@@ -125,6 +94,7 @@ def set_layout(switcher, me, layout_no, direction="forward"):
 
     current_state = [None]*4
     end_state = [None]*4
+
     for box in layouts[current_layout]["config"]:
         current_state[box[0]] = box.copy()
     for box in layouts[layout_no]["config"]:
@@ -139,7 +109,6 @@ def set_layout(switcher, me, layout_no, direction="forward"):
             anim_boxes.append(box.copy())
             
     cmds = []
-    box_delta = [0] * 4
     # Prepare for the animations
     for index in range(0, 4):
         if current_state[index] is None and end_state[index] is not None:
@@ -158,7 +127,7 @@ def set_layout(switcher, me, layout_no, direction="forward"):
             if(direction == "forward"):
                 end_state[index][3] = 27
             elif(direction == "reverse"):
-                end_state[index][3] = -27
+                end_state[index][3] = -27 
 
     animate_transition(switcher, me, current_state, end_state, 0.5)
 
@@ -168,22 +137,43 @@ def set_layout(switcher, me, layout_no, direction="forward"):
     for box in unused_boxes:
         cmds.append(SuperSourceCommand(me=me, box=box, enable=0))
     switcher.send_commands(cmds)
-        
-    current_layout = layout_no
+    settings.set("supersource:current_layout", layout_no)
 
-def NextSSLayout(switcher, me):
-    global current_layout    
-    layout = current_layout
+
+command.registerCommandModule("SS", "Commands for SS functions")
+
+atem_conn = None
+
+@command.Init("SS")
+def init(conn):
+    global atem_conn
+    atem_conn = conn
+
+@command.Feedback("SS")
+def feedback(hander=None):
+    layouts = settings.get("supersource:layouts")
+    storage = settings.get("supersource:layout_storage")
+    ret = [""]*len(storage)
+    for index, slot in enumerate(storage):
+        if slot is not None:
+            ret[index] = layouts[slot]["name"]
+    return {"slots": ret}
+
+@command.Command("SS")
+def NextLayout():
+    layout = settings.get("supersource:current_layout")
+    layouts = settings.get("supersource:layouts")
     if layout == None:
         layout = 0
     else:
         layout = (layout + 1) % len(layouts)
-    print("NextSSLayout:", layouts[layout]["name"])
-    set_layout(switcher, me, layout, direction="forward")
+    logger.debug("NextSSLayout:" + layouts[layout]["name"])
+    set_layout(atem_conn.switcher_, 0, layout, direction="forward")
 
-def PrevSSLayout(switcher, me):
-    global current_layout
-    layout = current_layout
+@command.Command("SS")
+def PrevLayout():
+    layout = settings.get("supersource:current_layout")
+    layouts = settings.get("supersource:layouts")
     if layout == None:
         layout = 0
     else:
@@ -191,31 +181,38 @@ def PrevSSLayout(switcher, me):
             layout = len(layouts) - 1
         else:
             layout = (layout - 1) % len(layouts)
-    print("PrecSSLayout", layouts[layout]["name"])
-    set_layout(switcher, me, layout, direction="reverse")
+    logger.debug("PrevSSLayout:" + layouts[layout]["name"])
+    set_layout(atem_conn.switcher_, 0, layout, direction="reverse")
 
-def RecallSSLayout(switcher, me, slot_no):
-    slot_no = int(slot_no)
+@command.Command("SS")
+def RecallLayout(slot_no):
+    slot_no = int(slot_no) - 1
     print("RecallSSLayout", slot_no)
-    if stored_layouts[slot_no] is not None:
-        set_layout(switcher, me, stored_layouts[slot_no])
+    layout = settings.get("supersource:layout_storage")[slot_no]
+    if layout is not None:
+        set_layout(atem_conn.switcher_, 0, layout)
 
-def StoreSSLayout(switcher, me, slot_no):
-    slot_no = int(slot_no)
+@command.Command("SS")
+def StoreLayout(slot_no):
+    slot_no = int(slot_no) - 1
+    layout = settings.get("supersource:current_layout")
+    layouts = settings.get("supersource:layouts")
     print("StoreSSLayout", slot_no)
-    stored_layouts[slot_no] = current_layout
+    settings.get("supersource:layout_storage")[slot_no] = layout
+    return feedback()
 
-def AssignSourceToSSBox(switcher, me, box, source):
+@command.Command("SS")
+def AssignSourceToBox(box, source):
     box = int(box)
     if source == "pvw":
-        source = switcher.state["preview_source"]
+        source = atem_conn.switcher_.state["preview_source"]
     elif source == "pgm":
-        source = switcher.state["program_source"]
+        source = atem_conn.switcher_.state["program_source"]
     else:
         source = int(source)
     print("AssignSourceToSSBox", source, box)
-    cmd = SuperSourceCommand(me=me, box=box, source=int(source))
-    switcher.send_commands([cmd])
+    cmd = SuperSourceCommand(me=0, box=box, source=int(source))
+    atem_conn.switcher_.send_commands([cmd])
         
 class SuperSourceCommand(Command):
     def __init__(self, me=0, box=0, enable=None, source=None, xpos=None, ypos=None, size=None, left_crop=None, right_crop=None, top_crop=None, bottom_crop=None):
