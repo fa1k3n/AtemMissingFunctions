@@ -1,0 +1,4 @@
+class TestVariable:
+    def test_set(self):
+        x = 1
+        assert x is 1

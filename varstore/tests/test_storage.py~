@@ -1,0 +1,6 @@
+from varstore import storage
+
+class TestStorage:
+    def test_create_storage(self):
+        store = storage.Storage()
+        
